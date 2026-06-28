@@ -27,7 +27,23 @@ function getEmailTransporter() {
   let host = process.env.SMTP_HOST;
   let port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
   let user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  let pass = process.env.SMTP_PASS;
+
+  // Smart Gmail App Password handler: automatically strip spaces if 16 characters
+  if (pass && user && user.toLowerCase().endsWith("@gmail.com")) {
+    const stripped = pass.replace(/\s+/g, "");
+    if (stripped.length === 16) {
+      pass = stripped;
+      console.log("[SMTP SMART FIX] Automatically stripped spaces from Gmail App Password.");
+    }
+  }
+
+  // Smart auto-defaults: If SMTP_HOST is not set, but user is Gmail, use smtp.gmail.com
+  if (!host && user && user.toLowerCase().endsWith("@gmail.com")) {
+    host = "smtp.gmail.com";
+    port = 587;
+    console.log("[SMTP SMART DEFAULTS] SMTP_HOST was empty, auto-selected smtp.gmail.com for Gmail user.");
+  }
 
   const currentConfigStr = `${host}:${port}:${user}:${pass}`;
 
@@ -56,29 +72,42 @@ function getEmailTransporter() {
     }
 
     if (host && user && pass) {
-      emailTransporter = nodemailer.createTransport({
-        host,
-        port,
-        secure: port === 465,
-        connectionTimeout: 5000, // 5 seconds connection timeout
-        greetingTimeout: 5000,   // 5 seconds greeting timeout
-        socketTimeout: 5000,     // 5 seconds socket inactivity timeout
-        tls: {
-          rejectUnauthorized: false // Prevents standard SSL/TLS certification issues
-        },
-        auth: {
-          user,
-          pass,
-        },
-      });
-      console.log(`Email Transporter configured with SMTP: ${host}:${port} (${user})`);
+      const isGmailWithoutHost = !process.env.SMTP_HOST && user && user.toLowerCase().endsWith("@gmail.com");
+      if (isGmailWithoutHost) {
+        emailTransporter = nodemailer.createTransport({
+          service: "gmail",
+          auth: {
+            user,
+            pass,
+          },
+        });
+        console.log(`Email Transporter configured using native 'gmail' service wrapper for ${user}`);
+      } else {
+        emailTransporter = nodemailer.createTransport({
+          host,
+          port,
+          secure: port === 465,
+          connectionTimeout: 10000, // 10 seconds connection timeout
+          greetingTimeout: 10000,   // 10 seconds greeting timeout
+          socketTimeout: 10000,     // 10 seconds socket inactivity timeout
+          tls: {
+            rejectUnauthorized: false, // Prevents standard SSL/TLS certification issues
+            minVersion: "TLSv1.2"
+          },
+          auth: {
+            user,
+            pass,
+          },
+        });
+        console.log(`Email Transporter configured with SMTP: ${host}:${port} (${user}) (secure: ${port === 465})`);
+      }
     }
   }
   return emailTransporter;
 }
 
 // Helper to send email
-async function sendOTPEmail(toEmail: string, username: string, otpCode: string): Promise<boolean> {
+async function sendOTPEmail(toEmail: string, username: string, otpCode: string): Promise<{ success: boolean; error?: string }> {
   const from = process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@luckycrown.com";
   const transporter = getEmailTransporter();
 
@@ -109,14 +138,14 @@ async function sendOTPEmail(toEmail: string, username: string, otpCode: string):
         html: htmlContent,
       });
       console.log(`[OTP EMAIL SUCCESS] Successfully sent OTP email to ${toEmail}`);
-      return true;
-    } catch (err) {
+      return { success: true };
+    } catch (err: any) {
       console.error("[OTP EMAIL ERROR] Failed to send email via SMTP:", err);
-      return false;
+      return { success: false, error: err.message || String(err) };
     }
   } else {
     console.log(`[OTP DEV FALLBACK] SMTP is not fully configured. Code generated: ${otpCode}`);
-    return false;
+    return { success: false, error: "SMTP credentials are not fully defined in environment variables (SMTP_HOST, SMTP_USER, SMTP_PASS)" };
   }
 }
 
@@ -520,7 +549,9 @@ app.post("/api/admin/login", async (req: Request, res: Response) => {
     `).run(otpCode, otpExpiresAt, admin.id);
 
     // Send OTP email asynchronously
-    const emailSent = await sendOTPEmail(adminEmail, admin.username, otpCode);
+    const emailResult = await sendOTPEmail(adminEmail, admin.username, otpCode);
+    const emailSent = emailResult.success;
+    const emailError = emailResult.error;
 
     // Save the OTP to a local file in the secure workspace for developer visibility
     try {
@@ -532,15 +563,9 @@ app.post("/api/admin/login", async (req: Request, res: Response) => {
       console.error("Failed to write otp_code.txt:", e);
     }
 
-    const isProduction = process.env.NODE_ENV === "production";
-    const isDeveloper = !isProduction && (
-      adminEmail.toLowerCase() === "lawrencemagadia04@gmail.com" ||
-      adminEmail.toLowerCase() === "luckycrownwebsite@gmail.com"
-    );
-
-    if (!emailSent && !isDeveloper) {
+    if (!emailSent) {
       res.status(500).json({
-        error: "SMTP Delivery failed. The system could not dispatch your security code. Please contact the administrator to verify mail server settings."
+        error: `SMTP Delivery failed: ${emailError || "Unknown error"}. Please check your SMTP configuration in your Render environment variables.`
       });
       return;
     }
@@ -549,10 +574,7 @@ app.post("/api/admin/login", async (req: Request, res: Response) => {
       requiresOtp: true,
       username: admin.username,
       email: adminEmail,
-      message: emailSent
-        ? "A verification code has been sent to your registered email address. If you do not receive it shortly, please check your Spam/Junk folders."
-        : "SMTP dispatch failed. Developer fallback active: check 'otp_code.txt' in your files, or use '123456'.",
-      devOtp: (isDeveloper && !emailSent) ? otpCode : undefined,
+      message: "A verification code has been sent to your registered email address. If you do not receive it shortly, please check your Spam/Junk folders."
     });
   } catch (err: any) {
     res.status(500).json({ error: "Login failed: " + err.message });
