@@ -1,0 +1,6 @@
+{
+  "name": "Lucky Crown Construction and Trading",
+  "description": "Premium construction, interior design, fit-out construction, and furniture supply services website with administrative management backend.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
